@@ -1,0 +1,46 @@
+# =============================
+# Global ignore for photobooth_project
+# =============================
+
+# ---- Python ----
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+backend/venv/
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Node / Frontend build ----
+**/node_modules/
+**/dist/
+**/dist-ssr/
+
+# ---- Logs ----
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Local storage outputs (generated) ----
+storage/temp_sessions/*
+!storage/temp_sessions/.gitkeep
+storage/final_outputs/*
+!storage/final_outputs/.gitkeep
+
+# ---- Camera/Windows metadata artifacts ----
+*.Zone.Identifier
+
+# ---- Editor / OS ----
+.vscode/
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
