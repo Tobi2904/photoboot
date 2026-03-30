@@ -38,12 +38,12 @@ async function apiRequest(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
 		return data
 	} catch (error) {
 		if (error.name === 'AbortError') {
-			throw new ApiError('Yeu cau qua thoi gian cho phep, vui long thu lai.', 408)
+			throw new ApiError('Yêu cầu quá thời gian cho phép, vui lòng thử lại.', 408)
 		}
 		if (error instanceof ApiError) {
 			throw error
 		}
-		throw new ApiError('Khong the ket noi den backend.', 0)
+		throw new ApiError('Không thể kết nối đến backend.', 0)
 	} finally {
 		clearTimeout(timeout)
 	}

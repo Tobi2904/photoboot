@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import './App.css'
 import {
   API_BASE,
@@ -13,6 +13,13 @@ import {
 
 const COUNTDOWN_OPTIONS = [0, 3, 5, 10]
 const CAPTURE_TARGET = 5
+const BACKGROUND_MIN_COUNT = 20
+const BACKGROUND_MAX_COUNT = 30
+const elementAssetModules = import.meta.glob('./assets/elements/*.{png,jpg,jpeg,webp,svg}', {
+  eager: true,
+  import: 'default',
+})
+const elementAssetUrls = Object.values(elementAssetModules)
 
 const createEmptySlots = (frame) => Array(frame?.slots?.length || 0).fill(null)
 
@@ -35,28 +42,28 @@ const normalizeFrame = (frame) => ({
 
 const getErrorMessage = (error) => {
   if (!(error instanceof ApiError)) {
-    return 'Da xay ra loi khong xac dinh. Vui long thu lai.'
+    return 'Đã xảy ra lỗi không xác định. Vui lòng thử lại.'
   }
 
   if (error.status === 503) {
-    return 'Camera Sony dang offline hoac ban. Vui long kiem tra ket noi USB va thu lai.'
+    return 'Camera Sony đang offline hoặc bận. Vui lòng kiểm tra kết nối USB và thử lại.'
   }
   if (error.status === 502) {
-    return 'Upload anh len S3 that bai. Vui long thu lai sau it giay.'
+    return 'Upload ảnh lên S3 thất bại. Vui lòng thử lại sau ít giây.'
   }
   if (error.status === 400) {
-    return error.message || 'Yeu cau khong hop le. Vui long kiem tra thao tac.'
+    return error.message || 'Yêu cầu không hợp lệ. Vui lòng kiểm tra thao tác.'
   }
   if (error.status === 404) {
-    return error.message || 'Khong tim thay tai nguyen.'
+    return error.message || 'Không tìm thấy tài nguyên.'
   }
   if (error.status === 408) {
-    return 'Yeu cau bi timeout. Vui long thu lai.'
+    return 'Yêu cầu bị timeout. Vui lòng thử lại.'
   }
   if (error.status === 0) {
-    return 'Khong ket noi duoc backend. Kiem tra server tai ' + API_BASE
+    return 'Không kết nối được backend. Kiểm tra server tại ' + API_BASE
   }
-  return error.message || 'Da xay ra loi he thong.'
+  return error.message || 'Đã xảy ra lỗi hệ thống.'
 }
 
 function App() {
@@ -212,7 +219,7 @@ function App() {
 
     const maxPhotos = CAPTURE_TARGET
     if (capturedPhotos.length >= maxPhotos) {
-      setErrorMessage(`Da chup du ${maxPhotos} anh cho khung nay.`)
+      setErrorMessage(`Đã chụp đủ ${maxPhotos} ảnh cho khung này.`)
       return
     }
 
@@ -312,7 +319,7 @@ function App() {
     // Add to first empty slot when clicking an unselected photo.
     const emptyIndex = arrangedPhotos.findIndex((filename) => filename === null)
     if (emptyIndex === -1) {
-      setErrorMessage('O hinh da full. Vui long bo chon mot hinh trong khung de them anh moi.')
+      setErrorMessage('Ô hình đã đầy. Vui lòng bỏ chọn một hình trong khung để thêm ảnh mới.')
       return
     }
 
@@ -459,20 +466,126 @@ function App() {
   const isCaptureFull = capturedPhotos.length >= CAPTURE_TARGET
   const canGoNext = capturedPhotos.length >= CAPTURE_TARGET
 
+  const randomBackgroundElements = useMemo(() => {
+    if (!elementAssetUrls.length) {
+      return []
+    }
+
+    const viewportWidth =
+      typeof window !== 'undefined' ? Math.max(window.innerWidth, 960) : 1920
+    const viewportHeight =
+      typeof window !== 'undefined' ? Math.max(window.innerHeight, 540) : 1080
+    const requiredCount = elementAssetUrls.length
+    const minCount = Math.max(requiredCount, BACKGROUND_MIN_COUNT)
+    const maxCount = Math.max(minCount, BACKGROUND_MAX_COUNT)
+    const totalElements =
+      minCount + Math.floor(Math.random() * (maxCount - minCount + 1))
+
+    const shuffle = (arr) => {
+      const copy = [...arr]
+      for (let i = copy.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[copy[i], copy[j]] = [copy[j], copy[i]]
+      }
+      return copy
+    }
+
+    const sourceQueue = []
+    sourceQueue.push(...shuffle(elementAssetUrls))
+    while (sourceQueue.length < totalElements) {
+      sourceQueue.push(...shuffle(elementAssetUrls))
+    }
+    const assignedSources = sourceQueue.slice(0, totalElements)
+
+    const ratio = viewportWidth / viewportHeight
+    const spreadFactor = 1.45
+    const gridCellCount = Math.max(totalElements, Math.ceil(totalElements * spreadFactor))
+    const cols = Math.max(1, Math.ceil(Math.sqrt(gridCellCount * ratio)))
+    const rows = Math.max(1, Math.ceil(gridCellCount / cols))
+    const cellWidth = viewportWidth / cols
+    const cellHeight = viewportHeight / rows
+    const jitterX = Math.max(14, cellWidth * 0.26)
+    const jitterY = Math.max(14, cellHeight * 0.26)
+
+    const cellIndexes = Array.from({ length: cols * rows }, (_, index) => index)
+    const sampledCells = shuffle(cellIndexes).slice(0, totalElements)
+
+    return assignedSources.map((src, index) => {
+      const cellIndex = sampledCells[index]
+      const col = cellIndex % cols
+      const row = Math.floor(cellIndex / cols)
+
+      const baseCenterX = col * cellWidth + cellWidth / 2
+      const baseCenterY = row * cellHeight + cellHeight / 2
+      const centerX = baseCenterX + (Math.random() * 2 - 1) * jitterX
+      const centerY = baseCenterY + (Math.random() * 2 - 1) * jitterY
+
+      const minCellSize = Math.min(cellWidth, cellHeight)
+      const minSize = Math.max(74, minCellSize * 0.3)
+      const maxSize = Math.max(minSize + 28, minCellSize * 0.88)
+      const size = Math.round(minSize + Math.random() * (maxSize - minSize))
+
+      const left = Math.max(0, Math.min(viewportWidth - size, centerX - size / 2))
+      const top = Math.max(0, Math.min(viewportHeight - size, centerY - size / 2))
+      const moveX = (18 + Math.random() * 34) * (Math.random() < 0.5 ? -1 : 1)
+      const moveY = (12 + Math.random() * 30) * (Math.random() < 0.5 ? -1 : 1)
+
+      return {
+        id: `bg-element-${index}`,
+        src,
+        top,
+        left,
+        size,
+        rotate: Math.floor(Math.random() * 360),
+        opacity: Number((0.22 + Math.random() * 0.3).toFixed(2)),
+        moveX: Number(moveX.toFixed(1)),
+        moveY: Number(moveY.toFixed(1)),
+        moveXBack: Number((-moveX * (0.45 + Math.random() * 0.3)).toFixed(1)),
+        moveYBack: Number((-moveY * (0.45 + Math.random() * 0.3)).toFixed(1)),
+        duration: Number((7 + Math.random() * 8).toFixed(2)),
+        delay: Number((Math.random() * 4).toFixed(2)),
+      }
+    })
+  }, [currentStep])
+
   return (
     <div className="app">
       {errorMessage && <div className="status-banner error">{errorMessage}</div>}
 
       {currentStep === 'select-frame' && (
         <div className="fullscreen-step frame-selection">
+          <div className="background-elements" aria-hidden="true">
+            {randomBackgroundElements.map((element) => (
+              <img
+                key={element.id}
+                src={element.src}
+                alt=""
+                className="background-element"
+                style={{
+                  top: `${element.top}px`,
+                  left: `${element.left}px`,
+                  width: `${element.size}px`,
+                  height: `${element.size}px`,
+                  opacity: element.opacity,
+                  '--base-rotate': `${element.rotate}deg`,
+                  '--float-x': `${element.moveX}px`,
+                  '--float-y': `${element.moveY}px`,
+                  '--float-back-x': `${element.moveXBack}px`,
+                  '--float-back-y': `${element.moveYBack}px`,
+                  '--float-duration': `${element.duration}s`,
+                  '--float-delay': `${element.delay}s`,
+                }}
+              />
+            ))}
+          </div>
           <div className="center-content">
             <h1 className="main-title">PHOTOBOOTH</h1>
-            <p className="subtitle">Chon khung anh de bat dau</p>
+            <p className="subtitle">Chọn khung ảnh để bắt đầu</p>
 
             {isLoadingFrames ? (
               <div className="liveview-loading">
                 <div className="spinner"></div>
-                <p>Dang tai danh sach frame...</p>
+                <p>Đang tải danh sách frame...</p>
               </div>
             ) : (
               <div className="frame-grid">
@@ -499,7 +612,7 @@ function App() {
               disabled={!selectedFrame || isLoadingFrames || actionLoading.startSession}
               onClick={goToCapture}
             >
-              {actionLoading.startSession ? 'DANG TAO SESSION...' : 'BAT DAU CHUP ->'}
+              {actionLoading.startSession ? 'ĐANG TẠO PHIÊN...' : 'BẮT ĐẦU CHỤP ->'}
             </button>
           </div>
         </div>
@@ -516,8 +629,8 @@ function App() {
 
             <div className="liveview-loading">
               <span>📷</span>
-              <p>Camera Sony a6400 dang san sang</p>
-              <p>Session: {sessionId || 'dang tao...'}</p>
+              <p>Camera Sony a6400 đang sẵn sàng</p>
+              <p>Session: {sessionId || 'đang tạo...'}</p>
             </div>
           </div>
 
@@ -529,7 +642,7 @@ function App() {
                 onClick={goBackToFrameSelect}
                 disabled={actionLoading.cancel}
               >
-                {actionLoading.cancel ? 'Dang huy...' : '← Doi Khung'}
+                {actionLoading.cancel ? 'Đang hủy...' : '← Đổi Khung'}
               </button>
             </div>
 
@@ -570,7 +683,7 @@ function App() {
                     className="btn-next"
                     onClick={goToArrange}
                   >
-                    Tiep →
+                    Tiếp →
                   </button>
                 )}
 
@@ -627,8 +740,8 @@ function App() {
             </div>
 
             <div className="photo-selection">
-              <h3>Chon anh cho vi tri {activeSlot + 1}</h3>
-              <p className="photo-hint">Click vao anh da chon de bo, click vao anh chua chon de them</p>
+              <h3>Chọn ảnh cho vị trí {activeSlot + 1}</h3>
+              <p className="photo-hint">Click vào ảnh đã chọn để bỏ, click vào ảnh chưa chọn để thêm</p>
               <div className="photo-list">
                 {capturedPhotos.map((photo) => {
                   const isSelected = arrangedPhotos.includes(photo.filename)
@@ -639,13 +752,13 @@ function App() {
                     onClick={() => handlePhotoClick(photo.filename)}
                   >
                     <img src={photo.previewUrl} alt={photo.filename} />
-                    {isSelected && <span className="used-indicator">DA CHON</span>}
+                    {isSelected && <span className="used-indicator">ĐÃ CHỌN</span>}
                   </div>
                   )
                 })}
               </div>
               <button type="button" className="btn-auto" onClick={autoArrangePhotos}>
-                Tu dong sap xep
+                Tự động sắp xếp
               </button>
             </div>
           </div>
@@ -657,7 +770,7 @@ function App() {
               disabled={arrangedPhotos.some((filename) => filename === null) || actionLoading.process}
               onClick={generateFinalImage}
             >
-              {actionLoading.process ? 'DANG XU LY...' : 'TAO ANH ->'}
+              {actionLoading.process ? 'ĐANG XỬ LÝ...' : 'TẠO ẢNH ->'}
             </button>
           </div>
         </div>
@@ -665,27 +778,54 @@ function App() {
 
       {currentStep === 'done' && finalResult && (
         <div className="fullscreen-step done-step">
-          <h1>HOAN THANH</h1>
-          <p className="done-subtext">Quet QR de tai anh ve dien thoai</p>
-
-          <div className="done-result-grid">
-            <div className="final-image-wrapper">
-              <img src={finalResult.finalImageUrl} alt="Final" className="final-image" />
-            </div>
-
-            <div className="qr-wrapper">
+          <div className="background-elements" aria-hidden="true">
+            {randomBackgroundElements.map((element) => (
               <img
-                src={`data:image/png;base64,${finalResult.qrCodeBase64}`}
-                alt="QR Download"
-                className="qr-image"
+                key={`done-${element.id}`}
+                src={element.src}
+                alt=""
+                className="background-element"
+                style={{
+                  top: `${element.top}px`,
+                  left: `${element.left}px`,
+                  width: `${element.size}px`,
+                  height: `${element.size}px`,
+                  opacity: element.opacity,
+                  '--base-rotate': `${element.rotate}deg`,
+                  '--float-x': `${element.moveX}px`,
+                  '--float-y': `${element.moveY}px`,
+                  '--float-back-x': `${element.moveXBack}px`,
+                  '--float-back-y': `${element.moveYBack}px`,
+                  '--float-duration': `${element.duration}s`,
+                  '--float-delay': `${element.delay}s`,
+                }}
               />
-            </div>
+            ))}
           </div>
 
-          <div className="done-actions">
-            <button type="button" className="btn-secondary" onClick={goBackToFrameSelect}>
-              CHUP LAI
-            </button>
+          <div className="done-content">
+            <h1>HOÀN THÀNH</h1>
+            <p className="done-subtext">Quét QR để tải ảnh về điện thoại</p>
+
+            <div className="done-result-grid">
+              <div className="final-image-wrapper">
+                <img src={finalResult.finalImageUrl} alt="Final" className="final-image" />
+              </div>
+
+              <div className="qr-wrapper">
+                <img
+                  src={`data:image/png;base64,${finalResult.qrCodeBase64}`}
+                  alt="QR Download"
+                  className="qr-image"
+                />
+              </div>
+            </div>
+
+            <div className="done-actions">
+              <button type="button" className="btn-secondary" onClick={goBackToFrameSelect}>
+                CHỤP LẠI
+              </button>
+            </div>
           </div>
         </div>
       )}
