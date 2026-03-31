@@ -80,4 +80,11 @@ export async function processSession(payload) {
 	})
 }
 
+export async function saveFallbackContact(payload) {
+	return apiRequest('/api/session/fallback-contact', {
+		method: 'POST',
+		body: JSON.stringify(payload),
+	})
+}
+
 export { ApiError }

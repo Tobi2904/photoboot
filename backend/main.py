@@ -37,6 +37,11 @@ from services.camera_service import (
 from services.image_service import merge_photos, MergeError, FRAME_TEMPLATES
 from services.s3_service import upload_to_s3, S3UploadError
 from services.qr_service import generate_qr_base64
+from services.fallback_contact_service import (
+    append_fallback_contact,
+    FallbackContactError,
+    PhoneValidationError,
+)
 from utils.cleanup import start_cleanup_scheduler
 
 # ---------------------------------------------------------------------- #
@@ -56,6 +61,7 @@ MAX_PHOTOS = int(os.getenv("MAX_PHOTOS_PER_SESSION", "5"))
 BASE_DIR = Path(__file__).resolve().parent.parent          # repo root
 STORAGE_DIR = BASE_DIR / "storage"
 FRAMES_DIR = BASE_DIR / "backend" / "frames"
+FALLBACK_CONTACTS_DIR = STORAGE_DIR / "fallback_contacts"
 
 # Logging
 logging.basicConfig(
@@ -146,6 +152,20 @@ class CaptureResponse(BaseModel):
     preview_url: str
     count: int
     max_photos: int
+
+
+class FallbackContactRequest(BaseModel):
+    session_id: str = Field(..., min_length=8, description="Session UUID from /api/start_session")
+    phone: str = Field(..., min_length=10, max_length=20, description="Vietnamese mobile number")
+    error_reason: str = Field(..., min_length=1, max_length=120)
+    frame_template_id: str = Field(..., min_length=1, max_length=64)
+    selected_photos: list[str] = Field(..., min_length=1, description="Selected photo filenames")
+
+
+class FallbackContactResponse(BaseModel):
+    status: str
+    file_name: str
+    row_index: int
 
 
 # ====================================================================== #
@@ -371,3 +391,35 @@ async def list_session_photos():
             for p in photos
         ],
     }
+
+
+@app.post("/api/session/fallback-contact", response_model=FallbackContactResponse)
+async def save_fallback_contact(body: FallbackContactRequest):
+    """Store fallback contact data so staff can manually send Zalo after failures."""
+    if body.frame_template_id not in FRAME_TEMPLATES:
+        raise HTTPException(status_code=400, detail="frame_template_id không hợp lệ.")
+
+    if any(not name.lower().endswith(".jpg") for name in body.selected_photos):
+        raise HTTPException(status_code=400, detail="selected_photos phải là danh sách tên file .jpg.")
+
+    try:
+        result = await run_in_threadpool(
+            append_fallback_contact,
+            output_dir=FALLBACK_CONTACTS_DIR,
+            session_id=body.session_id,
+            phone=body.phone,
+            error_reason=body.error_reason,
+            frame_template_id=body.frame_template_id,
+            selected_photos=body.selected_photos,
+        )
+    except PhoneValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except FallbackContactError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    logger.info("Fallback contact saved for session: %s", body.session_id)
+    return FallbackContactResponse(
+        status="saved",
+        file_name=result.file_path.name,
+        row_index=result.row_index,
+    )

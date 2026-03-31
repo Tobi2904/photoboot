@@ -7,12 +7,14 @@ import {
   capturePhoto,
   listFrames,
   processSession,
+  saveFallbackContact,
   startSession,
   toAbsoluteUrl,
 } from './api/client'
 
 const COUNTDOWN_OPTIONS = [0, 3, 5, 10]
 const CAPTURE_TARGET = 5
+const VN_PHONE_REGEX = /^0(3|5|7|8|9)\d{8}$/
 const BACKGROUND_MIN_COUNT = 20
 const BACKGROUND_MAX_COUNT = 30
 const elementAssetModules = import.meta.glob('./assets/elements/*.{png,jpg,jpeg,webp,svg}', {
@@ -66,6 +68,38 @@ const getErrorMessage = (error) => {
   return error.message || 'Đã xảy ra lỗi hệ thống.'
 }
 
+const shouldShowFallbackForm = (error) => {
+  if (!(error instanceof ApiError)) {
+    return false
+  }
+
+  if ([0, 408, 502].includes(error.status)) {
+    return true
+  }
+
+  const message = String(error.message || '').toLowerCase()
+  return message.includes('timeout') || message.includes('quá thời gian')
+}
+
+const getFallbackReason = (error) => {
+  if (!(error instanceof ApiError)) {
+    return 'unknown_error'
+  }
+
+  if (error.status === 408) {
+    return 'timeout'
+  }
+  if (error.status === 0) {
+    return 'network_error'
+  }
+  if (error.status === 502) {
+    return 'upload_fail'
+  }
+  return 'process_error'
+}
+
+const validateVietnamPhone = (phoneValue) => VN_PHONE_REGEX.test(phoneValue)
+
 function App() {
   const [currentStep, setCurrentStep] = useState('select-frame')
   const [frames, setFrames] = useState([])
@@ -92,6 +126,15 @@ function App() {
     cancel: false,
   })
   const [errorMessage, setErrorMessage] = useState('')
+  const [showFallbackForm, setShowFallbackForm] = useState(false)
+  const [fallbackPhone, setFallbackPhone] = useState('')
+  const [fallbackPhoneError, setFallbackPhoneError] = useState('')
+  const [fallbackSubmitMessage, setFallbackSubmitMessage] = useState('')
+  const [fallbackSubmitting, setFallbackSubmitting] = useState(false)
+  const [fallbackErrorReason, setFallbackErrorReason] = useState('')
+  const [fallbackSaved, setFallbackSaved] = useState(false)
+  const [showLocalPrintReady, setShowLocalPrintReady] = useState(false)
+  const [fallbackPreviewUrl, setFallbackPreviewUrl] = useState('')
 
   const countdownIntervalRef = useRef(null)
   const sessionIdRef = useRef(sessionId)
@@ -277,6 +320,14 @@ function App() {
     setArrangedPhotos(createEmptySlots(selectedFrame))
     setActiveSlot(0)
     setFinalResult(null)
+    setShowFallbackForm(false)
+    setFallbackPhone('')
+    setFallbackPhoneError('')
+    setFallbackSubmitMessage('')
+    setFallbackErrorReason('')
+    setFallbackSaved(false)
+    setShowLocalPrintReady(false)
+    setFallbackPreviewUrl('')
 
     const started = await startNewSession()
     if (started) {
@@ -300,7 +351,57 @@ function App() {
     setArrangedPhotos(createEmptySlots(selectedFrame))
     setFinalResult(null)
     setActiveSlot(0)
+    setShowFallbackForm(false)
+    setFallbackPhone('')
+    setFallbackPhoneError('')
+    setFallbackSubmitMessage('')
+    setFallbackErrorReason('')
+    setFallbackSaved(false)
+    setShowLocalPrintReady(false)
+    setFallbackPreviewUrl('')
     await cancelActiveSession(false)
+  }
+
+  const continueToLocalPrint = () => {
+    setShowFallbackForm(false)
+    setFallbackSubmitMessage('')
+    setFallbackPhoneError('')
+    setShowLocalPrintReady(true)
+  }
+
+  const submitFallbackContact = async () => {
+    const normalizedPhone = fallbackPhone.trim()
+    if (!validateVietnamPhone(normalizedPhone)) {
+      setFallbackPhoneError('Vui lòng nhập số di động Việt Nam dạng 0xxxxxxxxx.')
+      return
+    }
+
+    if (!sessionIdRef.current || !selectedFrame) {
+      setFallbackPhoneError('Không tìm thấy session hiện tại. Vui lòng thử lại thao tác.')
+      return
+    }
+
+    setFallbackSubmitting(true)
+    setFallbackPhoneError('')
+    setFallbackSubmitMessage('')
+
+    try {
+      await saveFallbackContact({
+        session_id: sessionIdRef.current,
+        phone: normalizedPhone,
+        error_reason: fallbackErrorReason || 'process_error',
+        frame_template_id: selectedFrame.id,
+        selected_photos: arrangedPhotos,
+      })
+      setFallbackSubmitMessage('Đã lưu thông tin. Nhân viên sẽ liên hệ gửi ảnh qua Zalo thủ công.')
+      setFallbackPhone('')
+      setFallbackSaved(true)
+      setShowFallbackForm(false)
+    } catch (error) {
+      setFallbackPhoneError(getErrorMessage(error))
+    } finally {
+      setFallbackSubmitting(false)
+    }
   }
 
   const handlePhotoClick = (photoFilename) => {
@@ -441,6 +542,11 @@ function App() {
 
     setActionLoading((prev) => ({ ...prev, process: true }))
     setErrorMessage('')
+    setFallbackSubmitMessage('')
+    setFallbackPhoneError('')
+    setFallbackSaved(false)
+    setShowLocalPrintReady(false)
+    setFallbackPreviewUrl('')
 
     try {
       const response = await processSession({
@@ -453,10 +559,33 @@ function App() {
         qrCodeBase64: response.qr_code_base64,
         s3Url: response.s3_url,
       })
+      setShowFallbackForm(false)
+      setFallbackPhone('')
+      setFallbackPhoneError('')
+      setFallbackSubmitMessage('')
+      setFallbackErrorReason('')
+      setFallbackSaved(false)
+      setShowLocalPrintReady(false)
+      setFallbackPreviewUrl('')
       setSessionId(null)
       setCurrentStep('done')
     } catch (error) {
-      setErrorMessage(getErrorMessage(error))
+      if (shouldShowFallbackForm(error)) {
+        setFallbackErrorReason(getFallbackReason(error))
+        setFallbackPhone('')
+        setFallbackPhoneError('')
+        setFallbackSubmitMessage('')
+        setShowLocalPrintReady(false)
+        if (sessionIdRef.current) {
+          setFallbackPreviewUrl(`/static/final_outputs/final_${sessionIdRef.current}.jpg`)
+        }
+        setShowFallbackForm(true)
+        setCurrentStep('done')
+        setFinalResult(null)
+        setErrorMessage('')
+      } else {
+        setErrorMessage(getErrorMessage(error))
+      }
     } finally {
       setActionLoading((prev) => ({ ...prev, process: false }))
     }
@@ -465,6 +594,8 @@ function App() {
   const slotCount = selectedFrame?.slots.length || 0
   const isCaptureFull = capturedPhotos.length >= CAPTURE_TARGET
   const canGoNext = capturedPhotos.length >= CAPTURE_TARGET
+  const resolvedFinalImageUrl = finalResult?.finalImageUrl || toAbsoluteUrl(fallbackPreviewUrl)
+  const hasQr = Boolean(finalResult?.qrCodeBase64)
 
   const randomBackgroundElements = useMemo(() => {
     if (!elementAssetUrls.length) {
@@ -772,11 +903,12 @@ function App() {
             >
               {actionLoading.process ? 'ĐANG XỬ LÝ...' : 'TẠO ẢNH ->'}
             </button>
+
           </div>
         </div>
       )}
 
-      {currentStep === 'done' && finalResult && (
+      {currentStep === 'done' && (
         <div className="fullscreen-step done-step">
           <div className="background-elements" aria-hidden="true">
             {randomBackgroundElements.map((element) => (
@@ -805,26 +937,91 @@ function App() {
 
           <div className="done-content">
             <h1>HOÀN THÀNH</h1>
-            <p className="done-subtext">Quét QR để tải ảnh về điện thoại</p>
+            <p className="done-subtext">
+              {finalResult
+                ? 'Quét QR để tải ảnh về điện thoại'
+                : showLocalPrintReady
+                  ? 'Bản mềm đang lỗi mạng. Ảnh cục bộ vẫn sẵn sàng cho bước in tại quầy.'
+                : 'Không thể tạo mã QR do kết nối bị gián đoạn.'}
+            </p>
 
-            <div className="done-result-grid">
-              <div className="final-image-wrapper">
-                <img src={finalResult.finalImageUrl} alt="Final" className="final-image" />
-              </div>
+            <div className={`done-result-grid ${!hasQr ? 'single-column' : ''}`}>
+              {(finalResult || showLocalPrintReady) && resolvedFinalImageUrl && (
+                <>
+                  <div className="final-image-wrapper">
+                    <img src={resolvedFinalImageUrl} alt="Final" className="final-image" />
+                  </div>
 
-              <div className="qr-wrapper">
-                <img
-                  src={`data:image/png;base64,${finalResult.qrCodeBase64}`}
-                  alt="QR Download"
-                  className="qr-image"
-                />
-              </div>
+                  {hasQr && (
+                    <div className="qr-wrapper">
+                      <img
+                        src={`data:image/png;base64,${finalResult?.qrCodeBase64 || ''}`}
+                        alt="QR Download"
+                        className="qr-image"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
+            {!finalResult && showFallbackForm && !fallbackSaved && (
+              <div className="fallback-panel" role="alert">
+                <h4>Kết nối bị gián đoạn, nhập SĐT để hỗ trợ gửi ảnh thủ công</h4>
+                <p>Vui lòng nhập số di động Việt Nam để nhân viên liên hệ qua Zalo.</p>
+
+                <div className="fallback-input-row">
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    maxLength={10}
+                    placeholder="Ví dụ: 0912345678"
+                    value={fallbackPhone}
+                    onChange={(event) => {
+                      const digitsOnly = event.target.value.replace(/\D/g, '').slice(0, 10)
+                      setFallbackPhone(digitsOnly)
+                      setFallbackPhoneError('')
+                    }}
+                    disabled={fallbackSubmitting}
+                  />
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={submitFallbackContact}
+                    disabled={fallbackSubmitting}
+                  >
+                    {fallbackSubmitting ? 'ĐANG LƯU...' : 'LƯU SĐT'}
+                  </button>
+                </div>
+
+                {fallbackPhoneError && <p className="fallback-error">{fallbackPhoneError}</p>}
+                {fallbackSubmitMessage && <p className="fallback-success">{fallbackSubmitMessage}</p>}
+              </div>
+            )}
+
+            {!finalResult && fallbackSaved && (
+              <div className="fallback-thanks">
+                <p>Xin lỗi vì sự bất tiện này.</p>
+                <p>Đội ngũ sự kiện Vang Vàn Bàu Trúc.</p>
+              </div>
+            )}
+
             <div className="done-actions">
-              <button type="button" className="btn-secondary" onClick={goBackToFrameSelect}>
-                CHỤP LẠI
-              </button>
+              {finalResult ? (
+                <button type="button" className="btn-secondary" onClick={goBackToFrameSelect}>
+                  CHỤP LẠI
+                </button>
+              ) : null}
+              {!finalResult && fallbackSaved && !showLocalPrintReady && (
+                <button type="button" className="btn-secondary" onClick={continueToLocalPrint}>
+                  TIẾP TỤC
+                </button>
+              )}
+              {!finalResult && showLocalPrintReady && (
+                <button type="button" className="btn-secondary" onClick={goBackToFrameSelect}>
+                  CHỤP LẠI
+                </button>
+              )}
             </div>
           </div>
         </div>
