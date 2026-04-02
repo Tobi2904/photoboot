@@ -5,6 +5,7 @@ import {
   ApiError,
   cancelSession,
   capturePhoto,
+  getLiveviewUrl,
   listFrames,
   processSession,
   saveFallbackContact,
@@ -135,14 +136,66 @@ function App() {
   const [fallbackSaved, setFallbackSaved] = useState(false)
   const [showLocalPrintReady, setShowLocalPrintReady] = useState(false)
   const [fallbackPreviewUrl, setFallbackPreviewUrl] = useState('')
+  const [liveviewReady, setLiveviewReady] = useState(false)
+  const [liveviewError, setLiveviewError] = useState(false)
+  const [liveviewRetryKey, setLiveviewRetryKey] = useState(0)
 
   const countdownIntervalRef = useRef(null)
   const sessionIdRef = useRef(sessionId)
   const touchRef = useRef({ photoFilename: null })
+  const liveviewRetryTimeoutRef = useRef(null)
 
   useEffect(() => {
     sessionIdRef.current = sessionId
   }, [sessionId])
+
+  const clearLiveviewRetry = useCallback(() => {
+    if (liveviewRetryTimeoutRef.current) {
+      clearTimeout(liveviewRetryTimeoutRef.current)
+      liveviewRetryTimeoutRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (currentStep !== 'capture') {
+      clearLiveviewRetry()
+      setLiveviewReady(false)
+      setLiveviewError(false)
+      return
+    }
+
+    setLiveviewReady(false)
+    setLiveviewError(false)
+    setLiveviewRetryKey((prev) => prev + 1)
+  }, [currentStep, clearLiveviewRetry])
+
+  useEffect(() => () => clearLiveviewRetry(), [clearLiveviewRetry])
+
+  const scheduleLiveviewRetry = useCallback(() => {
+    clearLiveviewRetry()
+    liveviewRetryTimeoutRef.current = setTimeout(() => {
+      setLiveviewError(false)
+      setLiveviewReady(false)
+      setLiveviewRetryKey((prev) => prev + 1)
+    }, 2000)
+  }, [clearLiveviewRetry])
+
+  const handleLiveviewLoad = useCallback(() => {
+    clearLiveviewRetry()
+    setLiveviewError(false)
+    setLiveviewReady(true)
+  }, [clearLiveviewRetry])
+
+  const handleLiveviewError = useCallback(() => {
+    setLiveviewError(true)
+    setLiveviewReady(false)
+    scheduleLiveviewRetry()
+  }, [scheduleLiveviewRetry])
+
+  const liveviewSrc = useMemo(
+    () => getLiveviewUrl(`${sessionId || 'pending'}-${liveviewRetryKey}`),
+    [sessionId, liveviewRetryKey],
+  )
 
   const clearCountdown = useCallback(() => {
     if (countdownIntervalRef.current) {
@@ -752,21 +805,32 @@ function App() {
       {currentStep === 'capture' && (
         <div className="fullscreen-step capture-step">
           <div className="liveview-fullscreen">
+            <img
+              src={liveviewSrc}
+              alt="Sony a6400 liveview"
+              className={`liveview-stream ${liveviewReady && !liveviewError ? 'visible' : ''}`}
+              onLoad={handleLiveviewLoad}
+              onError={handleLiveviewError}
+            />
+
             {countdown && (
               <div className="countdown-overlay">
                 <span className="countdown-number">{countdown}</span>
               </div>
             )}
 
-            <div className="liveview-loading">
-              <span>📷</span>
-              <p>Camera Sony a6400 đang sẵn sàng</p>
-              <p>Session: {sessionId || 'đang tạo...'}</p>
-            </div>
+            {(!liveviewReady || liveviewError) && (
+              <div className={liveviewError ? 'liveview-error' : 'liveview-loading'}>
+                <span>📷</span>
+                <p>Camera Sony a6400 đang sẵn sàng</p>
+                <p>Session: {sessionId || 'đang tạo...'}</p>
+                {liveviewError && <p>Mất kết nối liveview, đang thử kết nối lại...</p>}
+              </div>
+            )}
           </div>
 
           <div className="capture-overlay">
-            <div className="top-bar">
+            <div className="capture-top-left">
               <button
                 type="button"
                 className="btn-back"
@@ -777,8 +841,8 @@ function App() {
               </button>
             </div>
 
-            <div className="bottom-bar">
-              <div className="timer-group">
+            <div className="capture-left-rail">
+              <div className="timer-group timer-vertical">
                 {COUNTDOWN_OPTIONS.map((time) => (
                   <button
                     key={time}
@@ -791,44 +855,47 @@ function App() {
                   </button>
                 ))}
               </div>
+            </div>
 
-              <div className="capture-group">
-                <div className="photo-count">
-                  <span className="count">{capturedPhotos.length}</span>
-                  <span className="label">/ {CAPTURE_TARGET}</span>
+            <div className="capture-center-rail">
+              <button
+                type="button"
+                className={`capture-btn ${isCapturing || actionLoading.capture ? 'capturing' : ''}`}
+                onClick={startCountdown}
+                disabled={isCapturing || actionLoading.capture || actionLoading.process || isCaptureFull}
+              >
+                <span className="dot"></span>
+              </button>
+            </div>
+
+            <div className="capture-top-right">
+              <div className="photo-count photo-count-large photo-count-edge">
+                <span className="count">{capturedPhotos.length}</span>
+                <span className="label">/ {CAPTURE_TARGET}</span>
+              </div>
+
+              {capturedPhotos.length > 0 && (
+                <div className="photos-strip photos-strip-vertical">
+                  {capturedPhotos.map((photo, index) => (
+                    <div key={photo.filename} className="strip-photo">
+                      <img src={photo.previewUrl} alt={`Photo ${index + 1}`} />
+                      <span className="photo-num">{index + 1}</span>
+                    </div>
+                  ))}
                 </div>
+              )}
+            </div>
+
+            <div className="capture-right-rail">
+              {canGoNext && (
                 <button
                   type="button"
-                  className={`capture-btn ${isCapturing || actionLoading.capture ? 'capturing' : ''}`}
-                  onClick={startCountdown}
-                  disabled={isCapturing || actionLoading.capture || actionLoading.process || isCaptureFull}
+                  className="btn-next"
+                  onClick={goToArrange}
                 >
-                  <span className="dot"></span>
+                  Tiếp →
                 </button>
-              </div>
-
-              <div className="next-group">
-                {canGoNext && (
-                  <button
-                    type="button"
-                    className="btn-next"
-                    onClick={goToArrange}
-                  >
-                    Tiếp →
-                  </button>
-                )}
-
-                {capturedPhotos.length > 0 && (
-                  <div className="photos-strip">
-                    {capturedPhotos.map((photo, index) => (
-                      <div key={photo.filename} className="strip-photo">
-                        <img src={photo.previewUrl} alt={`Photo ${index + 1}`} />
-                        <span className="photo-num">{index + 1}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              )}
             </div>
           </div>
         </div>

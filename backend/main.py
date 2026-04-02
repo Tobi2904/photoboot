@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.concurrency import run_in_threadpool
@@ -42,6 +43,7 @@ from services.fallback_contact_service import (
     FallbackContactError,
     PhoneValidationError,
 )
+from services.liveview_service import FFmpegLiveviewManager
 from utils.cleanup import start_cleanup_scheduler
 
 # ---------------------------------------------------------------------- #
@@ -76,6 +78,7 @@ logger = logging.getLogger(__name__)
 # Kiosk chỉ phục vụ 1 khách tại 1 thời điểm → dùng biến global để lưu
 # session_id hiện tại. Các API capture/process sẽ validate theo biến này.
 active_session_id: str | None = None
+liveview_manager: FFmpegLiveviewManager | None = None
 
 # ---------------------------------------------------------------------- #
 #  App lifespan (startup / shutdown hooks)                                #
@@ -84,6 +87,8 @@ active_session_id: str | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start background tasks on startup; clean up on shutdown."""
+    global liveview_manager
+
     # Ensure storage directories exist
     (STORAGE_DIR / "temp_sessions").mkdir(parents=True, exist_ok=True)
     (STORAGE_DIR / "final_outputs").mkdir(parents=True, exist_ok=True)
@@ -93,8 +98,17 @@ async def lifespan(app: FastAPI):
         interval_minutes=CLEANUP_INTERVAL,
         ttl_minutes=SESSION_TTL,
     )
+
+    # Khoi tao manager singleton cho liveview bang FFmpeg.
+    liveview_manager = FFmpegLiveviewManager()
+
     logger.info("Photobooth Backend started.")
     yield
+
+    if liveview_manager is not None:
+        liveview_manager.stop()
+        liveview_manager = None
+
     # Giải phóng kết nối camera khi tắt server
     release_camera()
     logger.info("Photobooth Backend shutting down.")
@@ -207,6 +221,25 @@ async def list_frames():
         )
 
     return {"frames": frames}
+
+
+@app.get("/api/liveview")
+async def api_liveview():
+    """Stream MJPEG liveview from USB capture card via FFmpeg."""
+    if liveview_manager is None:
+        raise HTTPException(status_code=503, detail="Liveview manager chua duoc khoi tao.")
+
+    is_ready = await run_in_threadpool(
+        liveview_manager.wait_until_ready,
+        liveview_manager.ready_timeout_seconds(),
+    )
+    if not is_ready:
+        raise HTTPException(status_code=503, detail=liveview_manager.last_error())
+
+    return StreamingResponse(
+        liveview_manager.get_video_stream(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 # ------------------------------------------------------------------ #

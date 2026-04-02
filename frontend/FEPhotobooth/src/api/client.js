@@ -57,6 +57,11 @@ export function toAbsoluteUrl(relativeOrAbsolute) {
 	return `${API_BASE}${relativeOrAbsolute}`
 }
 
+export function getLiveviewUrl(cacheKey = '') {
+	const suffix = cacheKey ? `?v=${encodeURIComponent(cacheKey)}` : ''
+	return `${API_BASE}/api/liveview${suffix}`
+}
+
 export async function listFrames() {
 	return apiRequest('/api/frames', { method: 'GET' })
 }
