@@ -44,7 +44,10 @@ class FFmpegLiveviewManager:
 
 		self.device = os.getenv("LIVEVIEW_DEVICE", "/dev/video0")
 		self._ready_timeout_seconds = self._read_positive_float(
-			"LIVEVIEW_READY_TIMEOUT_SECONDS", 8.0
+			"LIVEVIEW_READY_TIMEOUT_SECONDS", 15.0
+		)
+		self._ready_min_frames = self._read_positive_int(
+			"LIVEVIEW_READY_MIN_FRAMES", 3
 		)
 		self._reconnect_delay_seconds = self._read_positive_float(
 			"LIVEVIEW_RECONNECT_DELAY_SECONDS", 1.5
@@ -56,6 +59,7 @@ class FFmpegLiveviewManager:
 		self.ffmpeg_bin = self._resolve_ffmpeg_binary()
 		self.latest_frame: bytes | None = None
 		self._last_frame_ts = 0.0
+		self._frame_counter = 0
 		self._latest_frame_lock = threading.Lock()
 
 		self.process: subprocess.Popen[bytes] | None = None
@@ -90,6 +94,22 @@ class FFmpegLiveviewManager:
 		except ValueError:
 			logger.warning(
 				"Gia tri %s=%r khong hop le, su dung mac dinh %.2f", key, raw, default
+			)
+			return default
+
+	def _read_positive_int(self, key: str, default: int) -> int:
+		raw = os.getenv(key, "").strip()
+		if not raw:
+			return default
+
+		try:
+			value = int(raw)
+			if value <= 0:
+				raise ValueError
+			return value
+		except ValueError:
+			logger.warning(
+				"Gia tri %s=%r khong hop le, su dung mac dinh %d", key, raw, default
 			)
 			return default
 
@@ -246,7 +266,25 @@ class FFmpegLiveviewManager:
 		with self._latest_frame_lock:
 			self.latest_frame = frame_bytes
 			self._last_frame_ts = time.monotonic()
+			self._frame_counter += 1
 		self._frame_ready_event.set()
+
+	def _is_stream_ready(self, min_frame_counter: int) -> bool:
+		proc = self.process
+		if proc is None or proc.poll() is not None:
+			return False
+
+		now = time.monotonic()
+		with self._latest_frame_lock:
+			last_frame_ts = self._last_frame_ts
+			frame_counter = self._frame_counter
+
+		if last_frame_ts <= 0:
+			return False
+
+		is_frame_fresh = (now - last_frame_ts) <= self._frame_stall_timeout_seconds
+		has_enough_frames = frame_counter >= min_frame_counter
+		return is_frame_fresh and has_enough_frames
 
 	def _restart_ffmpeg(self, reason: str, reset_frame: bool = True):
 		self._last_error = reason
@@ -358,9 +396,32 @@ class FFmpegLiveviewManager:
 			self._extract_jpeg_frames_from_buffer(buffer)
 
 	def wait_until_ready(self, timeout: float = 2.0) -> bool:
-		if self.latest_frame is not None:
-			return True
-		return self._frame_ready_event.wait(timeout=timeout)
+		wait_timeout = timeout if timeout > 0 else self._ready_timeout_seconds
+		with self._latest_frame_lock:
+			target_frame_counter = self._frame_counter + self._ready_min_frames
+
+		deadline = time.monotonic() + wait_timeout
+		while not self._stop_event.is_set():
+			if self._is_stream_ready(target_frame_counter):
+				return True
+
+			proc = self.process
+			if proc is None or proc.poll() is not None:
+				self._start_ffmpeg_process()
+
+			remaining = deadline - time.monotonic()
+			if remaining <= 0:
+				break
+
+			wait_for = min(0.25, remaining)
+			if self._frame_ready_event.wait(timeout=wait_for):
+				self._frame_ready_event.clear()
+
+		self._last_error = (
+			"Liveview chua san sang sau "
+			f"{wait_timeout:.1f}s (device: {self.device})."
+		)
+		return False
 
 	def ready_timeout_seconds(self) -> float:
 		return self._ready_timeout_seconds

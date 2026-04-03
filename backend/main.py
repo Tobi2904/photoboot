@@ -99,8 +99,9 @@ async def lifespan(app: FastAPI):
         ttl_minutes=SESSION_TTL,
     )
 
-    # Khoi tao manager singleton cho liveview bang FFmpeg.
-    liveview_manager = FFmpegLiveviewManager()
+    # Liveview se duoc khoi tao lazy o lan goi /api/liveview dau tien,
+    # tranh viec FFmpeg reconnect ngầm khi kiosk chua mo man hinh liveview.
+    liveview_manager = None
 
     logger.info("Photobooth Backend started.")
     yield
@@ -226,8 +227,10 @@ async def list_frames():
 @app.get("/api/liveview")
 async def api_liveview():
     """Stream MJPEG liveview from USB capture card via FFmpeg."""
+    global liveview_manager
+
     if liveview_manager is None:
-        raise HTTPException(status_code=503, detail="Liveview manager chua duoc khoi tao.")
+        liveview_manager = FFmpegLiveviewManager()
 
     is_ready = await run_in_threadpool(
         liveview_manager.wait_until_ready,
@@ -278,7 +281,13 @@ async def cancel_session():
 
     Dùng khi khách bấm hủy hoặc bỏ giữa chừng.
     """
-    global active_session_id
+    global active_session_id, liveview_manager
+
+    # Nut quay lai o man hinh chup se goi API nay, nen can tat liveview ngay.
+    if liveview_manager is not None:
+        liveview_manager.stop()
+        liveview_manager = None
+        logger.info("Liveview stopped while cancelling session: %s", active_session_id)
 
     if active_session_id is None:
         raise HTTPException(status_code=404, detail="No active session to cancel.")
@@ -345,13 +354,19 @@ async def api_process(body: ProcessRequest):
     Heavy image processing and the S3 upload run in a thread pool to
     keep the async loop free.
     """
-    global active_session_id
+    global active_session_id, liveview_manager
 
     if active_session_id is None:
         raise HTTPException(
             status_code=400,
             detail="No active session. Call /api/start_session first.",
         )
+
+    # Da ket thuc buoc chup, tat liveview de tranh FFmpeg chay nen khi dang process.
+    if liveview_manager is not None:
+        liveview_manager.stop()
+        liveview_manager = None
+        logger.info("Liveview stopped before processing session: %s", active_session_id)
 
     # --- Merge ---
     # run_in_threadpool giúp chạy hàm bất đồng bộ tại một thread khác, sẽ giúp main thread rảnh tay để có thể chạy take photto hoặc api khác 

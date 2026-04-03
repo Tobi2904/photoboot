@@ -31,23 +31,23 @@ FRAMES_DIR = BASE_DIR / "backend" / "frames"          # chứa các file PNG khu
 FRAME_TEMPLATES: dict[str, dict] = {
     "frame_2": {
         "display_name": "Cham Di San",
-        "canvas_size": (566, 1600),
+        "canvas_size": (3543, 5315),
         "slots": [
-            (28, 84, 522, 310),
-            (28, 410, 522, 310),
-            (28, 737, 522, 310),
-            (24, 1064, 522, 310),
+            (305, 420, 1374, 910),
+            (305, 1515, 1374, 905),
+            (303, 2614, 1375, 905),
+            (305, 3713, 1371, 825),
         ],
         "frame_file": "Frame-2.png",
     },
     "frame_3": {
         "display_name": "Am Vang Bau Truc",
-        "canvas_size": (566, 1600),
+        "canvas_size": (3543, 5315),
         "slots": [
-            (30, 84, 522, 310),
-            (30, 412, 522, 310),
-            (30, 738, 522, 310),
-            (26, 1066, 522, 310),
+            (316, 440, 1355, 887),
+            (316, 1530, 1355, 887),
+            (316, 2630, 1359, 888),
+            (316, 3728, 1354, 806),
         ],
         "frame_file": "Frame-3.png",
     },
