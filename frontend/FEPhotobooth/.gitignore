@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# Bỏ qua tất cả ảnh chụp test nằm ở thư mục gốc
+/*.jpg
+
+# Bỏ qua các file rác định danh của Windows
+*:Zone.Identifier
+
+# Bỏ qua thư mục chứa excel/data tạm nếu không muốn push lên Git
+storage/fallback_contacts/

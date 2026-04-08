@@ -44,3 +44,11 @@ storage/final_outputs/*
 .idea/
 .DS_Store
 Thumbs.db
+# 1. Bỏ qua tất cả ảnh chụp test (đuôi .jpg) ở bất kỳ thư mục nào
+*.jpg
+
+# 2. Bỏ qua các file rác hệ thống khi chép từ Windows sang
+*:Zone.Identifier
+
+# 3. Bỏ qua thư mục chứa data khách hàng (Cực kỳ quan trọng để bảo mật)
+storage/fallback_contacts/

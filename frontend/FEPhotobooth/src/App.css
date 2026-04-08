@@ -1191,6 +1191,49 @@ body {
   margin-top: 18px;
 }
 
+.print-feedback {
+  margin-top: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  border: 1px solid transparent;
+  box-shadow: var(--shadow-soft);
+}
+
+.print-feedback.loading {
+  background: rgba(111, 78, 55, 0.12);
+  border-color: rgba(111, 78, 55, 0.32);
+  color: var(--brown);
+}
+
+.print-feedback.error {
+  background: rgba(200, 63, 18, 0.12);
+  border-color: rgba(200, 63, 18, 0.38);
+  color: #8f2408;
+}
+
+.print-feedback.success {
+  background: rgba(114, 125, 115, 0.18);
+  border-color: rgba(114, 125, 115, 0.34);
+  color: #345041;
+}
+
+.print-feedback-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(111, 78, 55, 0.26);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  flex-shrink: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

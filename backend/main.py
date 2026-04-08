@@ -15,6 +15,9 @@ import os
 import uuid
 import shutil
 import logging
+import subprocess
+import json
+import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 
@@ -64,6 +67,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent          # repo root
 STORAGE_DIR = BASE_DIR / "storage"
 FRAMES_DIR = BASE_DIR / "backend" / "frames"
 FALLBACK_CONTACTS_DIR = STORAGE_DIR / "fallback_contacts"
+WINDOWS_PRINTER_NAME = "DS-RX1"
+PRINT_REQUEST_COOLDOWN_SECONDS = int(os.getenv("PRINT_REQUEST_COOLDOWN_SECONDS", "20"))
 
 # Logging
 logging.basicConfig(
@@ -79,6 +84,8 @@ logger = logging.getLogger(__name__)
 # session_id hiện tại. Các API capture/process sẽ validate theo biến này.
 active_session_id: str | None = None
 liveview_manager: FFmpegLiveviewManager | None = None
+recent_print_requests: dict[str, float] = {}
+inflight_print_requests: set[str] = set()
 
 # ---------------------------------------------------------------------- #
 #  App lifespan (startup / shutdown hooks)                                #
@@ -183,6 +190,150 @@ class FallbackContactResponse(BaseModel):
     row_index: int
 
 
+class PrintRequest(BaseModel):
+    filename: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Final output filename, e.g. final_abc123.jpg",
+    )
+
+
+DETECTED_ERROR_STATE_MESSAGES: dict[int, tuple[str, str]] = {
+    3: ("PAPER_LOW", "Máy in sắp hết giấy."),
+    4: ("PAPER_OUT", "Máy in đang hết giấy."),
+    5: ("INK_LOW", "Máy in sắp hết mực/ribbon."),
+    6: ("INK_OUT", "Máy in đã hết mực/ribbon."),
+    7: ("COVER_OPEN", "Nắp máy in đang mở."),
+    8: ("PAPER_JAM", "Máy in đang kẹt giấy."),
+    9: ("OFFLINE", "Máy in đang offline."),
+    10: ("SERVICE_REQUIRED", "Máy in cần bảo trì."),
+    11: ("OUTPUT_BIN_FULL", "Khay chứa giấy đầu ra đã đầy."),
+}
+
+PRINTER_STATUS_MESSAGES: dict[int, tuple[str, str]] = {
+    6: ("STOPPED", "Máy in đã dừng hoạt động."),
+    7: ("OFFLINE", "Máy in đang offline."),
+}
+
+EXTENDED_PRINTER_STATUS_MESSAGES: dict[int, tuple[str, str]] = {
+    6: ("STOPPED", "Máy in đã dừng hoạt động."),
+    7: ("OFFLINE", "Máy in đang offline."),
+}
+
+
+def get_windows_printer_status(printer_name: str) -> dict:
+    """Read printer health flags from Windows host via PowerShell + WMI."""
+    ps_safe_printer_name = printer_name.replace("'", "''")
+    status_command = (
+        "$ErrorActionPreference='Stop'; "
+        f"$p = Get-CimInstance Win32_Printer -Filter \"Name='{ps_safe_printer_name}'\"; "
+        "if ($null -eq $p) { throw 'PRINTER_NOT_FOUND' }; "
+        "$result = [ordered]@{ "
+        "Name = $p.Name; "
+        "DriverName = [string]$p.DriverName; "
+        "PortName = [string]$p.PortName; "
+        "WorkOffline = [bool]$p.WorkOffline; "
+        "PrinterStatus = [int]$p.PrinterStatus; "
+        "ExtendedPrinterStatus = [int]$p.ExtendedPrinterStatus; "
+        "DetectedErrorState = [int]$p.DetectedErrorState; "
+        "PaperOut = [bool]$p.PaperOut; "
+        "Status = [string]$p.Status; "
+        "Availability = [int]$p.Availability; "
+        "ErrorInformation = [int]$p.ErrorInformation; "
+        "PrinterState = [int]$p.PrinterState; "
+        "}; "
+        "$result | ConvertTo-Json -Compress"
+    )
+    status_result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", status_command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    raw_output = (status_result.stdout or "").strip()
+    if not raw_output:
+        raise RuntimeError("Không đọc được trạng thái máy in từ Windows host.")
+
+    return json.loads(raw_output)
+
+
+def detect_printer_issue(printer_status: dict) -> dict | None:
+    """Return normalized printer issues when device is unavailable."""
+    issues: list[dict[str, str]] = []
+
+    def add_issue(code: str, message: str, detail: str):
+        if any(item["code"] == code and item["detail"] == detail for item in issues):
+            return
+        issues.append(
+            {
+                "code": code,
+                "message": message,
+                "detail": detail,
+            }
+        )
+
+    if bool(printer_status.get("WorkOffline")):
+        add_issue("OFFLINE", "Máy in đang offline.", "WorkOffline=true")
+
+    if bool(printer_status.get("PaperOut")):
+        add_issue("PAPER_OUT", "Máy in đang hết giấy.", "PaperOut=true")
+
+    printer_status_code = int(printer_status.get("PrinterStatus", 0) or 0)
+    if printer_status_code in PRINTER_STATUS_MESSAGES:
+        code, message = PRINTER_STATUS_MESSAGES[printer_status_code]
+        add_issue(code, message, f"PrinterStatus={printer_status_code}")
+
+    extended_status_code = int(printer_status.get("ExtendedPrinterStatus", 0) or 0)
+    if extended_status_code in EXTENDED_PRINTER_STATUS_MESSAGES:
+        code, message = EXTENDED_PRINTER_STATUS_MESSAGES[extended_status_code]
+        add_issue(code, message, f"ExtendedPrinterStatus={extended_status_code}")
+
+    detected_error_state = int(printer_status.get("DetectedErrorState", 0) or 0)
+    if detected_error_state in DETECTED_ERROR_STATE_MESSAGES:
+        code, message = DETECTED_ERROR_STATE_MESSAGES[detected_error_state]
+        add_issue(code, message, f"DetectedErrorState={detected_error_state}")
+
+    if issues:
+        primary = issues[0]
+        return {
+            "code": primary["code"],
+            "message": primary["message"],
+            "detail": "; ".join(item["detail"] for item in issues),
+            "issues": issues,
+        }
+
+    return None
+
+
+def build_windows_printto_command(windows_path: str, printer_status: dict) -> str:
+    """Create a PowerShell script using rundll32 ImageView_PrintTo pipeline."""
+    printer_name = str(printer_status.get("Name") or WINDOWS_PRINTER_NAME)
+    driver_name = str(printer_status.get("DriverName") or "")
+    port_name = str(printer_status.get("PortName") or "")
+
+    ps_safe_windows_path = windows_path.replace("'", "''")
+    ps_safe_printer_name = printer_name.replace("'", "''")
+    ps_safe_driver_name = driver_name.replace("'", "''")
+    ps_safe_port_name = port_name.replace("'", "''")
+    return (
+        "$ErrorActionPreference='Stop'; "
+        f"$imgPath='{ps_safe_windows_path}'; "
+        f"$printerName='{ps_safe_printer_name}'; "
+        f"$driverName='{ps_safe_driver_name}'; "
+        f"$portName='{ps_safe_port_name}'; "
+        "$rundllPath=\"$env:SystemRoot\\System32\\rundll32.exe\"; "
+        "$entryPoint=\"$env:SystemRoot\\System32\\shimgvw.dll,ImageView_PrintTo\"; "
+        "$args=@($entryPoint, '/pt', $imgPath, $printerName); "
+        "if ($driverName) { $args += $driverName }; "
+        "if ($portName) { $args += $portName }; "
+        "$proc = Start-Process -FilePath $rundllPath -ArgumentList $args -PassThru -ErrorAction Stop; "
+        "$proc.WaitForExit(); "
+        "if ($proc.ExitCode -ne 0) { throw ('RUNDLL_PRINTTO_FAILED_' + $proc.ExitCode) }"
+    )
+
+
 # ====================================================================== #
 #  API Routes                                                             #
 # ====================================================================== #
@@ -191,6 +342,49 @@ class FallbackContactResponse(BaseModel):
 async def health_check():
     """Simple liveness probe."""
     return {"status": "ok"}
+
+
+@app.get("/api/printer/status")
+async def printer_status():
+    """Return printer diagnostics without sending any print command."""
+    try:
+        printer_state = await run_in_threadpool(
+            get_windows_printer_status,
+            WINDOWS_PRINTER_NAME,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        return {
+            "status": "error",
+            "ready": False,
+            "printer": WINDOWS_PRINTER_NAME,
+            "message": "Không đọc được trạng thái máy in từ Windows host.",
+            "detail": detail,
+            "supports_remaining_paper_count": False,
+            "remaining_paper_count": None,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "ready": False,
+            "printer": WINDOWS_PRINTER_NAME,
+            "message": "Có lỗi xảy ra khi kiểm tra trạng thái máy in.",
+            "detail": str(exc),
+            "supports_remaining_paper_count": False,
+            "remaining_paper_count": None,
+        }
+
+    issue = detect_printer_issue(printer_state)
+    return {
+        "status": "success" if issue is None else "error",
+        "ready": issue is None,
+        "printer": WINDOWS_PRINTER_NAME,
+        "printer_status": printer_state,
+        "issue": issue,
+        "supports_remaining_paper_count": False,
+        "remaining_paper_count": None,
+        "note": "Driver DS-RX1 qua WMI thường không cung cấp số giấy còn lại chính xác.",
+    }
 
 
 @app.get("/api/frames")
@@ -409,6 +603,130 @@ async def api_process(body: ProcessRequest):
         s3_url=s3_result["s3_url"],
         final_image_url=final_image_url,
     )
+
+
+@app.post("/api/print")
+async def api_print(body: PrintRequest):
+    """Send a print command from WSL to Windows Photo print handler."""
+    final_outputs_dir = (STORAGE_DIR / "final_outputs").resolve()
+    linux_path = (final_outputs_dir / body.filename).resolve()
+
+    try:
+        linux_path.relative_to(final_outputs_dir)
+    except ValueError:
+        return {
+            "status": "error",
+            "message": "filename không hợp lệ.",
+        }
+
+    if not linux_path.is_file():
+        return {
+            "status": "error",
+            "message": "Không tìm thấy file ảnh cần in.",
+        }
+
+    now = time.monotonic()
+    last_print_time = recent_print_requests.get(body.filename)
+    if last_print_time is not None:
+        remaining = int(PRINT_REQUEST_COOLDOWN_SECONDS - (now - last_print_time))
+        if remaining > 0:
+            return {
+                "status": "error",
+                "message": f"Ảnh này vừa gửi lệnh in. Vui lòng chờ {remaining}s để tránh in trùng.",
+                "detail": "duplicate_print_guard",
+                "retry_after_seconds": remaining,
+            }
+
+    if body.filename in inflight_print_requests:
+        return {
+            "status": "error",
+            "message": "Yêu cầu in cho ảnh này đang được xử lý. Vui lòng chờ.",
+            "detail": "print_request_in_progress",
+        }
+
+    inflight_print_requests.add(body.filename)
+
+    try:
+        cutoff = time.monotonic() - (PRINT_REQUEST_COOLDOWN_SECONDS * 10)
+        for filename, ts in list(recent_print_requests.items()):
+            if ts < cutoff:
+                recent_print_requests.pop(filename, None)
+
+        printer_status = await run_in_threadpool(
+            get_windows_printer_status,
+            WINDOWS_PRINTER_NAME,
+        )
+        issue = detect_printer_issue(printer_status)
+        if issue is not None:
+            logger.warning(
+                "Printer not ready (%s): %s",
+                WINDOWS_PRINTER_NAME,
+                issue.get("detail", "unknown"),
+            )
+            return {
+                "status": "error",
+                "message": issue["message"],
+                "issue_code": issue["code"],
+                "printer": WINDOWS_PRINTER_NAME,
+                "printer_status": printer_status,
+                "detail": issue["detail"],
+                "issues": issue["issues"],
+            }
+
+        wslpath_result = await run_in_threadpool(
+            subprocess.run,
+            ["wslpath", "-w", str(linux_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        windows_path = (wslpath_result.stdout or "").strip()
+        if not windows_path:
+            raise RuntimeError("wslpath trả về đường dẫn rỗng.")
+
+        print_command = build_windows_printto_command(
+            windows_path,
+            printer_status,
+        )
+        await run_in_threadpool(
+            subprocess.run,
+            ["powershell.exe", "-NoProfile", "-Command", print_command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        recent_print_requests[body.filename] = time.monotonic()
+
+        logger.info(
+            "Print command sent for %s to printer %s via Rundll32 ImageView_PrintTo",
+            body.filename,
+            WINDOWS_PRINTER_NAME,
+        )
+        return {
+            "status": "success",
+            "filename": body.filename,
+            "printer": WINDOWS_PRINTER_NAME,
+            "windows_path": windows_path,
+            "engine": "Rundll32ImageViewPrintTo",
+        }
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        logger.exception("Print command failed for %s", body.filename)
+        return {
+            "status": "error",
+            "message": "Gửi lệnh in thất bại.",
+            "detail": detail,
+        }
+    except Exception as exc:
+        logger.exception("Unexpected print error for %s", body.filename)
+        return {
+            "status": "error",
+            "message": "Có lỗi xảy ra khi gửi lệnh in.",
+            "detail": str(exc),
+        }
+    finally:
+        inflight_print_requests.discard(body.filename)
 
 
 # ------------------------------------------------------------------ #

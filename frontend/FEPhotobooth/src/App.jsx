@@ -7,6 +7,7 @@ import {
   capturePhoto,
   getLiveviewUrl,
   listFrames,
+  printPhoto,
   processSession,
   saveFallbackContact,
   startSession,
@@ -101,6 +102,20 @@ const getFallbackReason = (error) => {
 
 const validateVietnamPhone = (phoneValue) => VN_PHONE_REGEX.test(phoneValue)
 
+const getFilenameFromUrl = (urlValue) => {
+  if (!urlValue) {
+    return ''
+  }
+
+  const cleanPath = String(urlValue).split('?')[0]
+  const segments = cleanPath.split('/').filter(Boolean)
+  return segments[segments.length - 1] || ''
+}
+
+const PRINT_WAIT_MESSAGE = 'Đang gửi lệnh in, vui lòng chờ trong giây lát...'
+const PRINT_ERROR_MESSAGE = 'Máy in đang trục trặc, vui lòng liên hệ ban tổ chức.'
+const PRINT_SUCCESS_MESSAGE = 'Lệnh in đã được gửi. Vui lòng chờ máy in hoàn tất.'
+
 function App() {
   const [currentStep, setCurrentStep] = useState('select-frame')
   const [frames, setFrames] = useState([])
@@ -139,6 +154,9 @@ function App() {
   const [liveviewReady, setLiveviewReady] = useState(false)
   const [liveviewError, setLiveviewError] = useState(false)
   const [liveviewRetryKey, setLiveviewRetryKey] = useState(0)
+  const [isPrinting, setIsPrinting] = useState(false)
+  const [printFeedback, setPrintFeedback] = useState('')
+  const [printFeedbackType, setPrintFeedbackType] = useState('idle')
 
   const countdownIntervalRef = useRef(null)
   const sessionIdRef = useRef(sessionId)
@@ -381,6 +399,9 @@ function App() {
     setFallbackSaved(false)
     setShowLocalPrintReady(false)
     setFallbackPreviewUrl('')
+    setIsPrinting(false)
+    setPrintFeedback('')
+    setPrintFeedbackType('idle')
 
     const started = await startNewSession()
     if (started) {
@@ -412,6 +433,9 @@ function App() {
     setFallbackSaved(false)
     setShowLocalPrintReady(false)
     setFallbackPreviewUrl('')
+    setIsPrinting(false)
+    setPrintFeedback('')
+    setPrintFeedbackType('idle')
     await cancelActiveSession(false)
   }
 
@@ -600,6 +624,8 @@ function App() {
     setFallbackSaved(false)
     setShowLocalPrintReady(false)
     setFallbackPreviewUrl('')
+    setPrintFeedback('')
+    setPrintFeedbackType('idle')
 
     try {
       const response = await processSession({
@@ -611,6 +637,7 @@ function App() {
         finalImageUrl: toAbsoluteUrl(response.final_image_url),
         qrCodeBase64: response.qr_code_base64,
         s3Url: response.s3_url,
+        filename: getFilenameFromUrl(response.final_image_url),
       })
       setShowFallbackForm(false)
       setFallbackPhone('')
@@ -649,6 +676,36 @@ function App() {
   const canGoNext = capturedPhotos.length >= CAPTURE_TARGET
   const resolvedFinalImageUrl = finalResult?.finalImageUrl || toAbsoluteUrl(fallbackPreviewUrl)
   const hasQr = Boolean(finalResult?.qrCodeBase64)
+  const printTargetFilename = finalResult?.filename || getFilenameFromUrl(resolvedFinalImageUrl)
+  const canPrintFinalImage = Boolean(printTargetFilename)
+  const isPrintSent = printFeedbackType === 'success'
+
+  const handlePrint = async () => {
+    if (!canPrintFinalImage || isPrinting || isPrintSent) {
+      return
+    }
+
+    setIsPrinting(true)
+    setPrintFeedback(PRINT_WAIT_MESSAGE)
+    setPrintFeedbackType('loading')
+    setErrorMessage('')
+
+    try {
+      const response = await printPhoto({ filename: printTargetFilename })
+      if (response?.status === 'success') {
+        setPrintFeedback(PRINT_SUCCESS_MESSAGE)
+        setPrintFeedbackType('success')
+      } else {
+        setPrintFeedback(PRINT_ERROR_MESSAGE)
+        setPrintFeedbackType('error')
+      }
+    } catch {
+      setPrintFeedback(PRINT_ERROR_MESSAGE)
+      setPrintFeedbackType('error')
+    } finally {
+      setIsPrinting(false)
+    }
+  }
 
   const randomBackgroundElements = useMemo(() => {
     if (!elementAssetUrls.length) {
@@ -1074,22 +1131,60 @@ function App() {
             )}
 
             <div className="done-actions">
+              {canPrintFinalImage && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handlePrint}
+                  disabled={isPrinting || isPrintSent}
+                >
+                  {isPrinting ? 'Đang gửi lệnh in...' : isPrintSent ? 'Đã gửi lệnh in' : 'In Ảnh'}
+                </button>
+              )}
               {finalResult ? (
-                <button type="button" className="btn-secondary" onClick={goBackToFrameSelect}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={goBackToFrameSelect}
+                  disabled={isPrinting}
+                >
                   CHỤP LẠI
                 </button>
               ) : null}
               {!finalResult && fallbackSaved && !showLocalPrintReady && (
-                <button type="button" className="btn-secondary" onClick={continueToLocalPrint}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={continueToLocalPrint}
+                  disabled={isPrinting}
+                >
                   TIẾP TỤC
                 </button>
               )}
               {!finalResult && showLocalPrintReady && (
-                <button type="button" className="btn-secondary" onClick={goBackToFrameSelect}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={goBackToFrameSelect}
+                  disabled={isPrinting}
+                >
                   CHỤP LẠI
                 </button>
               )}
             </div>
+
+            {printFeedbackType !== 'idle' && (
+              <div
+                className={`print-feedback ${printFeedbackType}`}
+                role={printFeedbackType === 'error' ? 'alert' : 'status'}
+                aria-live="polite"
+              >
+                {printFeedbackType === 'loading' && (
+                  <span className="print-feedback-spinner" aria-hidden="true"></span>
+                )}
+                <span>{printFeedback}</span>
+              </div>
+            )}
           </div>
         </div>
       )}
